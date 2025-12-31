@@ -229,6 +229,10 @@ ErrorCode Client::InitTransferEngine(
     const std::string& local_hostname, const std::string& metadata_connstring,
     const std::string& protocol,
     const std::optional<std::string>& device_names) {
+    // Check if using TENT mode - TENT handles transport configuration internally
+    bool use_tent = (std::getenv("MC_USE_TENT") != nullptr) || 
+                    (std::getenv("MC_USE_TEV1") != nullptr);
+    
     // get auto_discover and filters from env
     std::optional<bool> env_auto_discover = get_auto_discover();
     bool auto_discover = false;
@@ -244,20 +248,23 @@ ErrorCode Client::InitTransferEngine(
             auto_discover = true;
         }
     }
-    transfer_engine_->setAutoDiscover(auto_discover);
+    
+    if (!use_tent) {
+        transfer_engine_->setAutoDiscover(auto_discover);
 
-    // Honor filters when auto-discovery is enabled; otherwise warn once
-    if (auto_discover) {
-        LOG(INFO) << "Transfer engine auto discovery is enabled for protocol: "
-                  << protocol;
-        auto filters = get_auto_discover_filters();
-        transfer_engine_->setWhitelistFilters(std::move(filters));
-    } else {
-        const char* env_filters = std::getenv("MC_MS_FILTERS");
-        if (env_filters && *env_filters != '\0') {
-            LOG(WARNING)
-                << "MC_MS_FILTERS is set but auto discovery is disabled; "
-                << "ignoring whitelist: " << env_filters;
+        // Honor filters when auto-discovery is enabled; otherwise warn once
+        if (auto_discover) {
+            LOG(INFO) << "Transfer engine auto discovery is enabled for protocol: "
+                      << protocol;
+            auto filters = get_auto_discover_filters();
+            transfer_engine_->setWhitelistFilters(std::move(filters));
+        } else {
+            const char* env_filters = std::getenv("MC_MS_FILTERS");
+            if (env_filters && *env_filters != '\0') {
+                LOG(WARNING)
+                    << "MC_MS_FILTERS is set but auto discovery is disabled; "
+                    << "ignoring whitelist: " << env_filters;
+            }
         }
     }
 
@@ -274,6 +281,16 @@ ErrorCode Client::InitTransferEngine(
     if (rc != 0) {
         LOG(ERROR) << "Failed to initialize transfer engine, rc=" << rc;
         return ErrorCode::INTERNAL_ERROR;
+    }
+
+    // TENT mode: Skip manual transport installation - TENT handles this internally
+    if (use_tent) {
+        LOG(INFO) << "Using TENT mode - transport configuration handled internally";
+        if (device_names.has_value()) {
+            LOG(INFO) << "Note: device_names parameter is ignored in TENT mode. "
+                      << "Configure devices via TENT config file or environment variables.";
+        }
+        return ErrorCode::OK;
     }
 
     if (!auto_discover) {
