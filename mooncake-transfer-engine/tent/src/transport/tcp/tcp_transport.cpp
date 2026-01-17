@@ -141,8 +141,7 @@ void TcpTransport::startTransfer(TcpTask *task) {
         LOG_FIRST_N(WARNING, 1)
             << "TCP transfer targets LOCAL_SEGMENT_ID on loopback endpoint "
             << local_segment_name_
-            << ". When running multiple store instances on the same host with
-               "
+            << ". When running multiple store instances on the same host with "
                "MC_STORE_MEMCPY=0, TCP local transfers will fail. Enable "
                "MC_STORE_MEMCPY or SHM, or use a non-loopback address.";
     }
