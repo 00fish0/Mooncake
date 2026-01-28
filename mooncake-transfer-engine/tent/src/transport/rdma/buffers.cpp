@@ -15,8 +15,68 @@
 #include "tent/transport/rdma/buffers.h"
 #include "tent/transport/rdma/context.h"
 
+#include <algorithm>
+#include <future>
+#include <thread>
+#include <utility>
+#include <vector>
+
 namespace mooncake {
 namespace tent {
+namespace {
+constexpr size_t kPretouchMinBytes = 4ull * 1024 * 1024 * 1024;
+constexpr unsigned kPretouchMaxThreads = 8;
+constexpr unsigned kPretouchMaxThreadsHighCore = 16;
+
+unsigned pickPretouchThreads(unsigned hwc) {
+    if (hwc == 0) return 0;
+    if (hwc > 64) return kPretouchMaxThreadsHighCore;
+    return std::min(hwc, kPretouchMaxThreads);
+}
+
+RdmaContext* pickPretouchContext(
+    const std::vector<RdmaContext*>& contexts) {
+    for (auto* context : contexts) {
+        if (context) return context;
+    }
+    return nullptr;
+}
+
+int preTouchMemory(RdmaContext* context, void* addr, size_t length) {
+    if (!context || length == 0) return 0;
+    unsigned hwc = std::thread::hardware_concurrency();
+    unsigned num_threads = pickPretouchThreads(hwc);
+    if (num_threads == 0) return 0;
+    size_t block_size = length / num_threads;
+    if (block_size == 0) return 0;
+
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+    std::vector<int> thread_results(num_threads, 0);
+
+    for (unsigned thread_i = 0; thread_i < num_threads; ++thread_i) {
+        size_t offset = thread_i * block_size;
+        size_t block_len =
+            (thread_i == num_threads - 1) ? (length - offset) : block_size;
+        void* block_addr = static_cast<char*>(addr) + offset;
+        threads.emplace_back([context, thread_i, block_addr, block_len,
+                              &thread_results]() {
+            thread_results[thread_i] =
+                context->preTouchMemory(block_addr, block_len);
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    for (auto rc : thread_results) {
+        if (rc != 0) return rc;
+    }
+    return 0;
+}
+}  // namespace
+
 LocalBufferManager::LocalBufferManager() {}
 
 LocalBufferManager::~LocalBufferManager() { clear(); }
@@ -33,22 +93,72 @@ static inline int getAccessFlags(Permission perm) {
 
 Status LocalBufferManager::addBuffer(BufferDesc& desc,
                                      const MemoryOptions& options) {
+    return addBufferInternal(desc, options, false);
+}
+
+Status LocalBufferManager::addBufferInternal(BufferDesc& desc,
+                                             const MemoryOptions& options,
+                                             bool force_sequential) {
     AddressRange range((void*)desc.addr, desc.length);
     BufferEntryForRdma staging;
     auto access = getAccessFlags(options.perm);
     assert(desc.rkey.empty());
-    RdmaContext::MemReg mem_reg_list[context_list_.size()] = {0};
-    std::vector<std::future<void>> tasks(context_list_.size());
-    for (size_t id = 0; id < context_list_.size(); ++id) {
-        auto context = context_list_[id];
-        auto* mem_reg = &mem_reg_list[id];
-        if (!context) continue;
-        tasks[id] = std::async([=]() {
-            *mem_reg =
-                context->registerMemReg((void*)desc.addr, desc.length, access);
-        });
+    size_t context_count = 0;
+    for (auto* context : context_list_) {
+        if (context) ++context_count;
     }
-    for (auto& task : tasks) task.get();
+
+    unsigned hwc = std::thread::hardware_concurrency();
+    bool do_pre_touch = context_count > 0 &&
+                        hwc >= 4 &&
+                        desc.length >= kPretouchMinBytes;
+    LOG(INFO) << "[TENT][RDMA] register buffer"
+              << " addr=" << (void*)desc.addr << " len=" << desc.length
+              << " contexts=" << context_count
+              << " hwc=" << hwc
+              << " pre_touch=" << (do_pre_touch ? "true" : "false")
+              << " force_sequential=" << (force_sequential ? "true" : "false");
+    if (do_pre_touch) {
+        auto* pretouch_context = pickPretouchContext(context_list_);
+        int ret = preTouchMemory(pretouch_context, (void*)desc.addr,
+                                 desc.length);
+        if (ret != 0) {
+            return Status::RdmaError(
+                "Unable to pre-touch buffer of local memory segment" LOC_MARK);
+        }
+    }
+
+    std::vector<RdmaContext::MemReg> mem_reg_list(context_list_.size(),
+                                                  nullptr);
+    bool use_parallel_reg = !force_sequential && context_count > 1;
+    LOG(INFO) << "[TENT][RDMA] register strategy"
+              << " parallel=" << (use_parallel_reg ? "true" : "false")
+              << " context_count=" << context_count;
+    if (use_parallel_reg) {
+        std::vector<std::pair<size_t, std::future<void>>> tasks;
+        tasks.reserve(context_count);
+        void* addr = (void*)desc.addr;
+        size_t length = desc.length;
+        for (size_t id = 0; id < context_list_.size(); ++id) {
+            auto* context = context_list_[id];
+            if (!context) continue;
+            tasks.emplace_back(
+                id, std::async(std::launch::async,
+                               [context, &mem_reg_list, id, addr, length,
+                                access]() {
+                                   mem_reg_list[id] = context->registerMemReg(
+                                       addr, length, access);
+                               }));
+        }
+        for (auto& task : tasks) task.second.get();
+    } else {
+        for (size_t id = 0; id < context_list_.size(); ++id) {
+            auto* context = context_list_[id];
+            if (!context) continue;
+            mem_reg_list[id] =
+                context->registerMemReg((void*)desc.addr, desc.length, access);
+        }
+    }
     for (size_t id = 0; id < context_list_.size(); ++id) {
         if (!context_list_[id]) continue;
         if (!mem_reg_list[id]) {
@@ -68,8 +178,23 @@ Status LocalBufferManager::addBuffer(BufferDesc& desc,
 
 Status LocalBufferManager::addBuffer(std::vector<BufferDesc>& desc_list,
                                      const MemoryOptions& options) {
+    if (desc_list.empty()) return Status::OK();
+    if (desc_list.size() == 1) {
+        return addBufferInternal(desc_list.front(), options, false);
+    }
+
+    std::vector<std::future<Status>> tasks;
+    tasks.reserve(desc_list.size());
     for (auto& desc : desc_list) {
-        CHECK_STATUS(addBuffer(desc, options));
+        auto* desc_ptr = &desc;
+        tasks.emplace_back(std::async(std::launch::async, [this, desc_ptr,
+                                                          options]() {
+            return addBufferInternal(*desc_ptr, options, true);
+        }));
+    }
+    for (auto& task : tasks) {
+        auto status = task.get();
+        if (!status.ok()) return status;
     }
     return Status::OK();
 }

@@ -14,6 +14,7 @@
 
 #include "tent/platform/cpu.h"
 #include "tent/common/status.h"
+#include "tent/common/utils/prefault.h"
 #include "tent/common/utils/random.h"
 
 #include <glog/logging.h>
@@ -24,17 +25,22 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <algorithm>
+#include <chrono>
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <infiniband/verbs.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unordered_set>
 #include <future>
 #include <unistd.h>
+#include <thread>
 
 namespace mooncake {
 namespace tent {
@@ -295,10 +301,14 @@ const std::vector<RangeLocation> CpuPlatform::getLocation(void* start,
         pages[i] = (void*)((char*)aligned_start + i * kPageSize);
     }
 
-    for (int i = 0; i < n; i++) {
-        volatile char* p = (volatile char*)pages[i];
-        *p = *p;
-    }
+    PrefaultOptions prefault_opts;
+    prefault_opts.tag = "[TENT][CPU]";
+    prefault_opts.page_size = kPageSize;
+    prefault_opts.max_touch_threads = 1;
+    prefault_opts.max_madvise_threads = 1;
+    prefault_opts.madvise_chunk_bytes = 1ULL << 30;
+    prefault_opts.touch_single_thread_threshold_pages = 4096;
+    prefaultPages(pages, n, aligned_start, start, len, prefault_opts);
 
     int rc = numa_move_pages(0, n, pages, nullptr, status, 0);
     if (rc != 0) {

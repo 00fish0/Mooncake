@@ -109,6 +109,9 @@ class LocalBufferManager {
         std::unordered_map<RdmaContext *, void *> mem_reg_map;
     };
 
+    Status addBufferInternal(BufferDesc &desc, const MemoryOptions &options,
+                             bool force_sequential);
+
    private:
     RWSpinlock lock_;
     std::vector<RdmaContext *> context_list_;

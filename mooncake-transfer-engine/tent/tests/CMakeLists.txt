@@ -10,3 +10,8 @@ add_executable(metrics_config_loader_test metrics_config_loader_test.cpp)
 target_link_libraries(metrics_config_loader_test PRIVATE tent_metrics tent_common gtest gtest_main glog)
 target_include_directories(metrics_config_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 add_test(NAME metrics_config_loader_test COMMAND metrics_config_loader_test)
+
+# Prefault benchmark (not added to ctest)
+add_executable(prefault_bench prefault_bench.cpp)
+target_link_libraries(prefault_bench PRIVATE tent_common glog)
+target_include_directories(prefault_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
