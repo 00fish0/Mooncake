@@ -112,12 +112,6 @@ Status LocalBufferManager::addBufferInternal(BufferDesc& desc,
     bool do_pre_touch = context_count > 0 &&
                         hwc >= 4 &&
                         desc.length >= kPretouchMinBytes;
-    LOG(INFO) << "[TENT][RDMA] register buffer"
-              << " addr=" << (void*)desc.addr << " len=" << desc.length
-              << " contexts=" << context_count
-              << " hwc=" << hwc
-              << " pre_touch=" << (do_pre_touch ? "true" : "false")
-              << " force_sequential=" << (force_sequential ? "true" : "false");
     if (do_pre_touch) {
         auto* pretouch_context = pickPretouchContext(context_list_);
         int ret = preTouchMemory(pretouch_context, (void*)desc.addr,
@@ -131,9 +125,6 @@ Status LocalBufferManager::addBufferInternal(BufferDesc& desc,
     std::vector<RdmaContext::MemReg> mem_reg_list(context_list_.size(),
                                                   nullptr);
     bool use_parallel_reg = !force_sequential && context_count > 1;
-    LOG(INFO) << "[TENT][RDMA] register strategy"
-              << " parallel=" << (use_parallel_reg ? "true" : "false")
-              << " context_count=" << context_count;
     if (use_parallel_reg) {
         std::vector<std::pair<size_t, std::future<void>>> tasks;
         tasks.reserve(context_count);

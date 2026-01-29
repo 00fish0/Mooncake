@@ -15,8 +15,6 @@
 #ifndef TENT_PREFAULT_H
 #define TENT_PREFAULT_H
 
-#include <glog/logging.h>
-
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -39,7 +37,6 @@ struct PrefaultOptions {
     };
 
     Mode mode = Mode::kAuto;
-    const char* tag = nullptr;
     size_t page_size = 4096;
     unsigned max_touch_threads = 1;
     unsigned max_madvise_threads = 1;
@@ -56,15 +53,13 @@ struct PrefaultResult {
 };
 
 inline PrefaultResult prefaultPages(void** pages, int n,
-                                    uintptr_t aligned_start, void* start,
-                                    size_t len,
+                                    uintptr_t aligned_start,
                                     const PrefaultOptions& options) {
     PrefaultResult result;
     if (!pages || n <= 0) {
         return result;
     }
 
-    const char* tag = options.tag ? options.tag : "[TENT]";
     const size_t page_size = options.page_size ? options.page_size : 4096;
     const size_t aligned_len = static_cast<size_t>(n) * page_size;
     const bool allow_fallback = options.mode == PrefaultOptions::Mode::kAuto;
@@ -145,20 +140,9 @@ inline PrefaultResult prefaultPages(void** pages, int n,
             result.threads = madvise_threads;
             result.chunk_bytes = madvise_chunk;
             result.duration_ms = madv_ms;
-            LOG(INFO) << tag << " madvise_populate_write"
-                      << " addr=" << start
-                      << " len=" << len
-                      << " pages=" << n
-                      << " threads=" << madvise_threads
-                      << " chunk_bytes=" << madvise_chunk
-                      << " duration_ms=" << madv_ms;
             return result;
         }
 
-        LOG(WARNING) << tag << " madvise_populate_write failed"
-                     << " addr=" << start
-                     << " len=" << len
-                     << " errno=" << madv_errno;
         if (!allow_fallback) {
             result.method = "madvise_failed";
             result.err = madv_errno;
@@ -182,19 +166,10 @@ inline PrefaultResult prefaultPages(void** pages, int n,
             munlock(reinterpret_cast<void*>(aligned_start), aligned_len);
             result.method = "mlock";
             result.duration_ms = mlock_ms;
-            LOG(INFO) << tag << " mlock_prefault"
-                      << " addr=" << start
-                      << " len=" << len
-                      << " pages=" << n
-                      << " duration_ms=" << mlock_ms;
             return result;
         }
 
         result.err = errno;
-        LOG(WARNING) << tag << " mlock_prefault failed"
-                     << " addr=" << start
-                     << " len=" << len
-                     << " errno=" << result.err;
         if (!allow_fallback) {
             result.method = "mlock_failed";
             return result;
@@ -234,12 +209,6 @@ inline PrefaultResult prefaultPages(void** pages, int n,
         result.method = "touch";
         result.threads = num_threads;
         result.duration_ms = touch_ms;
-        LOG(INFO) << tag << " touch_pages"
-                  << " addr=" << start
-                  << " len=" << len
-                  << " pages=" << n
-                  << " threads=" << num_threads
-                  << " duration_ms=" << touch_ms;
     }
     }
 

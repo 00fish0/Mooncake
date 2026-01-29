@@ -302,13 +302,12 @@ const std::vector<RangeLocation> CpuPlatform::getLocation(void* start,
     }
 
     PrefaultOptions prefault_opts;
-    prefault_opts.tag = "[TENT][CPU]";
     prefault_opts.page_size = kPageSize;
     prefault_opts.max_touch_threads = 1;
     prefault_opts.max_madvise_threads = 1;
     prefault_opts.madvise_chunk_bytes = 1ULL << 30;
     prefault_opts.touch_single_thread_threshold_pages = 4096;
-    prefaultPages(pages, n, aligned_start, start, len, prefault_opts);
+    prefaultPages(pages, n, aligned_start, prefault_opts);
 
     int rc = numa_move_pages(0, n, pages, nullptr, status, 0);
     if (rc != 0) {

@@ -91,8 +91,8 @@ void run_mode(const char* name, mooncake::tent::PrefaultOptions::Mode mode,
         } else if (mode == mooncake::tent::PrefaultOptions::Mode::kMadvise) {
             opts.max_madvise_threads = t;
         }
-        auto result = mooncake::tent::prefaultPages(
-            pages, n, aligned_start, start, len, opts);
+        auto result =
+            mooncake::tent::prefaultPages(pages, n, aligned_start, opts);
         std::cout << name << " mode=" << result.method
                   << " threads=" << t
                   << " duration_ms=" << result.duration_ms

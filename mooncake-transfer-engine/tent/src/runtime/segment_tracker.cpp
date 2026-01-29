@@ -14,7 +14,6 @@
 
 #include "tent/runtime/segment_tracker.h"
 
-#include <chrono>
 #include <cassert>
 #include <filesystem>
 #include <set>
@@ -111,18 +110,7 @@ Status SegmentTracker::addInBatch(
         BufferDesc new_desc;
         new_desc.addr = base;
         new_desc.length = length;
-        auto loc_start = std::chrono::steady_clock::now();
         auto entries = Platform::getLoader().getLocation((void*)base, length);
-        auto loc_end = std::chrono::steady_clock::now();
-        auto loc_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(loc_end -
-                                                                  loc_start)
-                .count();
-        LOG(INFO) << "[TENT][SEGMENT] getLocation"
-                  << " addr=" << (void*)base
-                  << " len=" << length
-                  << " entries=" << entries.size()
-                  << " duration_ms=" << loc_ms;
         if (entries.size() == 1)
             new_desc.location = entries[0].location;
         else {
