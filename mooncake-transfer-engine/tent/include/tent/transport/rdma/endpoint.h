@@ -15,6 +15,9 @@
 #ifndef TENT_ENDPOINT_H
 #define TENT_ENDPOINT_H
 
+#include <cstdint>
+#include <condition_variable>
+#include <mutex>
 #include <queue>
 
 #include "context.h"
@@ -172,6 +175,13 @@ class RdmaEndPoint {
     volatile int inflight_slices_;
     uint32_t padding_[7];
     RWSpinlock lock_;
+    std::mutex handshake_mutex_;
+    std::condition_variable handshake_cv_;
+    bool handshake_inflight_ = false;
+    uint64_t handshake_epoch_ = 0;
+    uint64_t handshake_done_epoch_ = 0;
+    Status handshake_status_{};
+    bool handshake_status_valid_ = false;
 
     std::string peer_server_name_;
     std::string peer_nic_name_;

@@ -18,6 +18,9 @@
 
 #include "tent/rpc/rpc.h"
 
+#include <chrono>
+#include <cstdlib>
+
 #include <glog/logging.h>
 
 #include "tent/common/utils/ip.h"
@@ -92,14 +95,27 @@ void CoroRpcAgent::process(int func_id) {
 Status CoroRpcAgent::call(const std::string& server_addr, int func_id,
                           const std::string_view& request,
                           std::string& response) {
+    static int kConnectTimeoutMs = []() {
+        const char* env = std::getenv("MC_TENT_RPC_CONNECT_TIMEOUT_MS");
+        if (!env) return 3000;
+        int val = std::atoi(env);
+        return val > 0 ? val : 3000;
+    }();
+    static int kRequestTimeoutMs = []() {
+        const char* env = std::getenv("MC_TENT_RPC_REQUEST_TIMEOUT_MS");
+        if (!env) return 5000;
+        int val = std::atoi(env);
+        return val > 0 ? val : 5000;
+    }();
     coro_rpc::coro_rpc_client* client = nullptr;
     {
         std::lock_guard<std::mutex> lock(sessions_mutex_);
         auto it = sessions_.find(server_addr);
         if (it == sessions_.end()) {
             coro_rpc_client* client = new coro_rpc_client();
-            auto conn_result =
-                async_simple::coro::syncAwait(client->connect(server_addr));
+            auto conn_result = async_simple::coro::syncAwait(
+                client->connect(server_addr,
+                                std::chrono::milliseconds(kConnectTimeoutMs)));
             if (conn_result.val() != 0) {
                 LOG(ERROR) << "Failed to connect RPC server. "
                            << "server " << server_addr << ", "
@@ -114,7 +130,8 @@ Status CoroRpcAgent::call(const std::string& server_addr, int func_id,
     }
     client->set_req_attachment(request);
     auto call_result = async_simple::coro::syncAwait(
-        client->call<&CoroRpcAgent::process>(func_id));
+        client->call_for<&CoroRpcAgent::process>(
+            std::chrono::milliseconds(kRequestTimeoutMs), func_id));
     if (!call_result.has_value()) {
         // LOG(ERROR) << "Failed to call RPC function."
         //            << "server " << server_addr << ", "

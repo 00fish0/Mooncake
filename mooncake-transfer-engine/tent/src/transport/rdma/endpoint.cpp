@@ -212,82 +212,150 @@ int RdmaEndPoint::deconstruct() {
 
 Status RdmaEndPoint::connect(const std::string& peer_server_name,
                              const std::string& peer_nic_name) {
-    RWSpinlock::WriteGuard guard(lock_);
     if (peer_server_name.empty() || peer_nic_name.empty())
         return Status::InvalidArgument("Invalid peer path" LOC_MARK);
-    if (status_ == EP_READY) return Status::OK();
-    if (status_ != EP_HANDSHAKING)
-        return Status::InvalidArgument(
-            "Endpoint not in handshaking state" LOC_MARK);
     auto& transport = context_->transport_;
     auto& manager = transport.metadata_->segmentManager();
-    auto qp_num = qpNum();
+    {
+        RWSpinlock::WriteGuard guard(lock_);
+        if (status_ == EP_READY) return Status::OK();
+        if (status_ != EP_HANDSHAKING)
+            return Status::InvalidArgument(
+                "Endpoint not in handshaking state" LOC_MARK);
+    }
+
+    bool do_handshake = false;
+    uint64_t epoch = 0;
+    Status wait_status = Status::OK();
+    {
+        std::unique_lock<std::mutex> lk(handshake_mutex_);
+        if (handshake_inflight_) {
+            uint64_t wait_epoch = handshake_epoch_;
+            handshake_cv_.wait(
+                lk, [&] { return handshake_done_epoch_ >= wait_epoch; });
+            if (handshake_status_valid_) {
+                wait_status = handshake_status_;
+            } else {
+                wait_status = Status::TooManyRequests(
+                    "Concurrent endpoint handshake" LOC_MARK);
+            }
+        } else {
+            handshake_inflight_ = true;
+            handshake_status_valid_ = false;
+            epoch = ++handshake_epoch_;
+            do_handshake = true;
+        }
+    }
+    if (!do_handshake) {
+        if (wait_status.ok()) return Status::OK();
+        return wait_status;
+    }
+
+    auto finish_handshake = [&](const Status& status) {
+        {
+            std::lock_guard<std::mutex> lk(handshake_mutex_);
+            handshake_inflight_ = false;
+            handshake_status_ = status;
+            handshake_status_valid_ = true;
+            handshake_done_epoch_ = epoch;
+        }
+        handshake_cv_.notify_all();
+        return status;
+    };
+
     BootstrapDesc local_desc, peer_desc;
+    auto qp_num = qpNum();
     local_desc.local_nic_path =
         MakeNicPath(transport.local_segment_name_, context_->name());
     local_desc.peer_nic_path = MakeNicPath(peer_server_name, peer_nic_name);
     local_desc.qp_num = qp_num;
     local_desc.notify_qp_num = notifyQpNum();  // Pass notification QP number
-    std::shared_ptr<SegmentDesc> segment_desc;
-    if (local_desc.local_nic_path == local_desc.peer_nic_path) {
+
+    SegmentDescRef segment_desc;
+    const bool same_endpoint =
+        (local_desc.local_nic_path == local_desc.peer_nic_path);
+    if (same_endpoint) {
         segment_desc = manager.getLocal();
     } else {
-        CHECK_STATUS(manager.getRemote(segment_desc, peer_server_name));
+        Status status = manager.getRemote(segment_desc, peer_server_name);
+        if (!status.ok()) return finish_handshake(status);
         auto rpc_server_addr = segment_desc->getMemory().rpc_server_addr;
-        assert(!rpc_server_addr.empty());
-        CHECK_STATUS(
-            ControlClient::bootstrap(rpc_server_addr, local_desc, peer_desc));
-        qp_num = peer_desc.qp_num;
+        if (rpc_server_addr.empty()) {
+            return finish_handshake(Status::RpcServiceError(
+                "Empty rpc_server_addr" LOC_MARK));
+        }
+        auto local_seg = manager.getLocal();
+        std::string local_rpc_addr;
+        if (local_seg) {
+            local_rpc_addr = local_seg->getMemory().rpc_server_addr;
+        }
+        if (!local_rpc_addr.empty() && rpc_server_addr == local_rpc_addr) {
+            int rc = transport.onSetupRdmaConnections(local_desc, peer_desc);
+            if (rc) {
+                std::string msg = peer_desc.reply_msg.empty()
+                                      ? "Local bootstrap failed"
+                                      : peer_desc.reply_msg;
+                return finish_handshake(
+                    Status::RpcServiceError(msg + LOC_MARK));
+            }
+        } else {
+            status =
+                ControlClient::bootstrap(rpc_server_addr, local_desc, peer_desc);
+            if (!status.ok()) return finish_handshake(status);
+        }
     }
-    assert(qp_num.size() && segment_desc);
+
+    if (!peer_desc.qp_num.empty()) qp_num = peer_desc.qp_num;
+    if (!segment_desc) {
+        return finish_handshake(
+            Status::MetadataError("Missing segment desc" LOC_MARK));
+    }
     auto dev_desc = segment_desc->findDevice(peer_nic_name);
     if (!dev_desc) {
         LOG(ERROR) << "Unable to find RDMA device: " << peer_nic_name
                    << " in segment " << segment_desc->name;
-        return Status::DeviceNotFound("Unable to find RDMA device" LOC_MARK);
-    }
-    peer_server_name_ = peer_server_name;
-    peer_nic_name_ = peer_nic_name;
-    int rc = setupAllQPs(dev_desc->gid, dev_desc->lid, qp_num);
-    if (rc) {
-        return Status::InternalError(
-            "Failed to configure RDMA endpoint" LOC_MARK);
+        return finish_handshake(
+            Status::DeviceNotFound("Unable to find RDMA device" LOC_MARK));
     }
 
-    // Setup notification QP connection if peer supports it
-    if (peer_desc.notify_qp_num != 0 && notify_qp_) {
-        rc = setupNotifyQpConnection(notify_qp_, context_, dev_desc->gid,
-                                     dev_desc->lid, peer_desc.notify_qp_num);
-        if (rc) {
-            LOG(WARNING)
-                << "Failed to setup notification QP, notification disabled";
-            notify_connected_ = false;
+    Status final_status = Status::OK();
+    int rc = 0;
+    {
+        RWSpinlock::WriteGuard guard(lock_);
+        if (status_ != EP_HANDSHAKING) {
+            final_status = Status::TooManyRequests(
+                "Concurrent endpoint handshake" LOC_MARK);
         } else {
-            notify_connected_ = true;
-            context_->transport_.registerNotifyQp(notify_qp_->qp_num, this);
+            peer_server_name_ = peer_server_name;
+            peer_nic_name_ = peer_nic_name;
+            rc = setupAllQPs(dev_desc->gid, dev_desc->lid, qp_num);
+            if (rc) {
+                final_status = Status::InternalError(
+                    "Failed to configure RDMA endpoint" LOC_MARK);
+            }
+        }
+
+        // Setup notification QP connection if peer supports it
+        if (final_status.ok() && peer_desc.notify_qp_num != 0 && notify_qp_) {
+            rc = setupNotifyQpConnection(notify_qp_, context_, dev_desc->gid,
+                                         dev_desc->lid,
+                                         peer_desc.notify_qp_num);
+            if (rc) {
+                LOG(WARNING) << "Failed to setup notification QP, "
+                                "notification disabled";
+                notify_connected_ = false;
+            } else {
+                notify_connected_ = true;
+                context_->transport_.registerNotifyQp(notify_qp_->qp_num, this);
+            }
         }
     }
 
-    return Status::OK();
+    return finish_handshake(final_status);
 }
 
 Status RdmaEndPoint::accept(const BootstrapDesc& peer_desc,
                             BootstrapDesc& local_desc) {
-    RWSpinlock::WriteGuard guard(lock_);
-    if (status_ == EP_READY) {
-        LOG(WARNING) << "Endpoint is established with " << peer_nic_name_
-                     << " of " << peer_server_name_ << ", resetting first";
-        resetUnlocked();
-        status_ = EP_HANDSHAKING;
-    } else if (status_ == EP_RESET) {
-        resetUnlocked();
-        status_ = EP_HANDSHAKING;
-    } else if (status_ != EP_HANDSHAKING) {
-        LOG(ERROR) << "Endpoint not in handshaking state: "
-                   << statusToString(status_);
-        return Status::InvalidArgument(
-            "Endpoint not in handshaking state" LOC_MARK);
-    }
     auto& transport = context_->transport_;
     auto& manager = transport.metadata_->segmentManager();
     auto peer_nic_path = peer_desc.local_nic_path;
@@ -295,40 +363,111 @@ Status RdmaEndPoint::accept(const BootstrapDesc& peer_desc,
     auto peer_nic_name = getNicNameFromNicPath(peer_nic_path);
     if (peer_server_name.empty() || peer_nic_name.empty())
         return Status::InvalidArgument("Invalid peer path" LOC_MARK);
+
+    {
+        RWSpinlock::WriteGuard guard(lock_);
+        if (status_ == EP_READY) {
+            LOG(WARNING) << "Endpoint is established with " << peer_nic_name_
+                         << " of " << peer_server_name_ << ", resetting first";
+            resetUnlocked();
+            status_ = EP_HANDSHAKING;
+        } else if (status_ == EP_RESET) {
+            resetUnlocked();
+            status_ = EP_HANDSHAKING;
+        } else if (status_ != EP_HANDSHAKING) {
+            LOG(ERROR) << "Endpoint not in handshaking state: "
+                       << statusToString(status_);
+            return Status::InvalidArgument(
+                "Endpoint not in handshaking state" LOC_MARK);
+        }
+    }
+
+    bool do_handshake = false;
+    uint64_t epoch = 0;
+    Status wait_status = Status::OK();
+    {
+        std::unique_lock<std::mutex> lk(handshake_mutex_);
+        if (handshake_inflight_) {
+            uint64_t wait_epoch = handshake_epoch_;
+            handshake_cv_.wait(
+                lk, [&] { return handshake_done_epoch_ >= wait_epoch; });
+            if (handshake_status_valid_) {
+                wait_status = handshake_status_;
+            } else {
+                wait_status = Status::TooManyRequests(
+                    "Concurrent endpoint handshake" LOC_MARK);
+            }
+        } else {
+            handshake_inflight_ = true;
+            handshake_status_valid_ = false;
+            epoch = ++handshake_epoch_;
+            do_handshake = true;
+        }
+    }
+    if (!do_handshake) {
+        if (wait_status.ok()) return Status::OK();
+        return wait_status;
+    }
+
+    auto finish_handshake = [&](const Status& status) {
+        {
+            std::lock_guard<std::mutex> lk(handshake_mutex_);
+            handshake_inflight_ = false;
+            handshake_status_ = status;
+            handshake_status_valid_ = true;
+            handshake_done_epoch_ = epoch;
+        }
+        handshake_cv_.notify_all();
+        return status;
+    };
+
     local_desc.local_nic_path =
         MakeNicPath(transport.local_segment_name_, context_->name());
     local_desc.peer_nic_path = peer_nic_path;
     local_desc.qp_num = qpNum();
     local_desc.notify_qp_num = notifyQpNum();  // Pass notification QP number
     SegmentDescRef segment_desc;
-    CHECK_STATUS(manager.getRemote(segment_desc, peer_server_name));
+    Status status = manager.getRemote(segment_desc, peer_server_name);
+    if (!status.ok()) return finish_handshake(status);
     auto dev_desc = segment_desc->findDevice(peer_nic_name);
     if (!dev_desc) {
         LOG(ERROR) << "Unable to find RDMA device: " << peer_nic_name
                    << " in segment " << segment_desc->name;
-        return Status::DeviceNotFound("Unable to find RDMA device" LOC_MARK);
+        return finish_handshake(
+            Status::DeviceNotFound("Unable to find RDMA device" LOC_MARK));
     }
-    peer_server_name_ = peer_server_name;
-    peer_nic_name_ = peer_nic_name;
-    int rc = setupAllQPs(dev_desc->gid, dev_desc->lid, peer_desc.qp_num);
-    if (rc) {
-        return Status::InternalError(
-            "Failed to configure RDMA endpoint" LOC_MARK);
-    }
-
-    // Setup notification QP connection if peer supports it
-    if (peer_desc.notify_qp_num != 0 && notify_qp_) {
-        rc = setupNotifyQpConnection(notify_qp_, context_, dev_desc->gid,
-                                     dev_desc->lid, peer_desc.notify_qp_num);
-        if (rc) {
-            notify_connected_ = false;
+    Status final_status = Status::OK();
+    int rc = 0;
+    {
+        RWSpinlock::WriteGuard guard(lock_);
+        if (status_ != EP_HANDSHAKING) {
+            final_status = Status::TooManyRequests(
+                "Concurrent endpoint handshake" LOC_MARK);
         } else {
-            notify_connected_ = true;
-            context_->transport_.registerNotifyQp(notify_qp_->qp_num, this);
+            peer_server_name_ = peer_server_name;
+            peer_nic_name_ = peer_nic_name;
+            rc = setupAllQPs(dev_desc->gid, dev_desc->lid, peer_desc.qp_num);
+            if (rc) {
+                final_status = Status::InternalError(
+                    "Failed to configure RDMA endpoint" LOC_MARK);
+            }
+        }
+
+        // Setup notification QP connection if peer supports it
+        if (final_status.ok() && peer_desc.notify_qp_num != 0 && notify_qp_) {
+            rc = setupNotifyQpConnection(notify_qp_, context_, dev_desc->gid,
+                                         dev_desc->lid,
+                                         peer_desc.notify_qp_num);
+            if (rc) {
+                notify_connected_ = false;
+            } else {
+                notify_connected_ = true;
+                context_->transport_.registerNotifyQp(notify_qp_->qp_num, this);
+            }
         }
     }
 
-    return Status::OK();
+    return finish_handshake(final_status);
 }
 
 int RdmaEndPoint::reset() {
@@ -339,6 +478,15 @@ int RdmaEndPoint::reset() {
 int RdmaEndPoint::resetUnlocked() {
     if (status_ != EP_READY) return 0;
     status_ = EP_RESET;
+    {
+        std::lock_guard<std::mutex> lk(handshake_mutex_);
+        handshake_inflight_ = false;
+        handshake_status_ = Status::InternalError(
+            "Endpoint reset while handshaking" LOC_MARK);
+        handshake_status_valid_ = true;
+        handshake_done_epoch_ = handshake_epoch_;
+    }
+    handshake_cv_.notify_all();
     resetInflightSlices();
     ibv_qp_attr attr;
     memset(&attr, 0, sizeof(attr));
