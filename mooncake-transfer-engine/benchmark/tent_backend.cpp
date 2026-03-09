@@ -45,6 +45,11 @@ std::shared_ptr<Config> loadConfig() {
     config->set("metadata_type", XferBenchConfig::metadata_type);
     config->set("metadata_servers", XferBenchConfig::metadata_url_list);
     config->set("rpc_server_port", XferBenchConfig::rpc_server_port);
+    auto device_names = parseDeviceNames(XferBenchConfig::device_name);
+    if (!device_names.empty()) {
+        config->set("topology/rdma_whitelist", device_names);
+        config->set("topology/rdma_blacklist", std::vector<std::string>{});
+    }
 
     // Configure transport types based on xport_type parameter
     if (!XferBenchConfig::xport_type.empty()) {

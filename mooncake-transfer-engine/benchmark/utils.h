@@ -67,6 +67,7 @@ struct XferBenchConfig {
     static std::string metadata_url_list;
     static int rpc_server_port;
     static std::string xport_type;
+    static std::string device_name;
     static std::string backend;
     static bool notifi;
 
@@ -145,6 +146,8 @@ void printStatsHeader();
 
 void printStats(size_t block_size, size_t batch_size, XferBenchStats& stats,
                 int num_threads);
+
+std::vector<std::string> parseDeviceNames(const std::string& device_names);
 
 #ifdef USE_CUDA
 static inline bool isCudaMemory(void* ptr) {

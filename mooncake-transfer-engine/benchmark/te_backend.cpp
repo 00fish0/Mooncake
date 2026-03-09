@@ -168,6 +168,12 @@ TEBenchRunner::TEBenchRunner() {
     signal(SIGINT, signalHandlerV0);
     signal(SIGTERM, signalHandlerV0);
     engine_ = std::make_unique<mooncake::TransferEngine>(true);
+    auto device_names = parseDeviceNames(XferBenchConfig::device_name);
+    if (!device_names.empty()) {
+        LOG(INFO) << "Restricting classic RDMA devices to "
+                  << XferBenchConfig::device_name;
+        engine_->setWhitelistFilters(std::move(device_names));
+    }
     auto conn_str = XferBenchConfig::metadata_type == "p2p"
                         ? "P2PHANDSHAKE"
                         : XferBenchConfig::metadata_url_list;

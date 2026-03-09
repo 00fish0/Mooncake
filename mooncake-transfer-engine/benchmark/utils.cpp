@@ -14,6 +14,7 @@
 
 #include "utils.h"
 
+#include <cctype>
 #include <gflags/gflags.h>
 #include <iostream>
 
@@ -45,6 +46,8 @@ DEFINE_int32(
     rpc_server_port, 0,
     "RPC server port used for p2p metadata service (0 = auto-select).");
 DEFINE_string(xport_type, "", "Transport type: rdma|shm|mnnvl|gds|iouring");
+DEFINE_string(device_name, "",
+              "RDMA device name(s) to use, comma-separated.");
 DEFINE_string(backend, "tent", "Transport backend: classic|tent");
 DEFINE_bool(notifi, false,
             "Enable RDMA notification for performance measurement.");
@@ -70,6 +73,7 @@ std::string XferBenchConfig::metadata_type;
 std::string XferBenchConfig::metadata_url_list;
 int XferBenchConfig::rpc_server_port = 0;
 std::string XferBenchConfig::xport_type;
+std::string XferBenchConfig::device_name;
 std::string XferBenchConfig::backend;
 bool XferBenchConfig::notifi = false;
 
@@ -97,6 +101,7 @@ void XferBenchConfig::loadFromFlags() {
     rpc_server_port = FLAGS_rpc_server_port;
 
     xport_type = FLAGS_xport_type;
+    device_name = FLAGS_device_name;
     backend = FLAGS_backend;
     notifi = FLAGS_notifi;
 
@@ -118,6 +123,24 @@ double XferMetricStats::percentile(double p) {
     } else {
         return sorted[idx];
     }
+}
+
+std::vector<std::string> parseDeviceNames(const std::string& device_names) {
+    std::vector<std::string> parsed;
+    std::stringstream ss(device_names);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        auto begin = std::find_if_not(token.begin(), token.end(), [](char ch) {
+            return std::isspace(static_cast<unsigned char>(ch));
+        });
+        auto end = std::find_if_not(token.rbegin(), token.rend(), [](char ch) {
+            return std::isspace(static_cast<unsigned char>(ch));
+        }).base();
+        if (begin < end) {
+            parsed.emplace_back(begin, end);
+        }
+    }
+    return parsed;
 }
 
 void printStatsHeader() {
