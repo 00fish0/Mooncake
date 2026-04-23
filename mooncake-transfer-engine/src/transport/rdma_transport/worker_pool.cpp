@@ -325,6 +325,27 @@ void WorkerPool::performPollCq(int thread_id) {
                     // redispatch(slice_list, thread_id);
                 }
             } else {
+                const uint64_t now_ns = getCurrentTimeInNano();
+                const int64_t post_ts = slice->ts;
+                const uint64_t total_us =
+                    (post_ts > 0 && now_ns > (uint64_t)post_ts)
+                        ? (now_ns - (uint64_t)post_ts) / 1000
+                        : 0;
+                if (total_us > 100000) {
+                    LOG(WARNING)
+                        << "TRANSFER_SLOW req=" << slice->task->batch_id << ":"
+                        << static_cast<const void *>(slice) << " t=" << now_ns
+                        << " op="
+                        << (slice->opcode == Transport::TransferRequest::READ
+                                ? "READ"
+                                : "WRITE")
+                        << " client=" << context_.engine().local_server_name_
+                        << " peer="
+                        << getServerNameFromNicPath(slice->peer_nic_path)
+                        << " local_nic=" << context_.deviceName()
+                        << " bytes=" << slice->length
+                        << " total_us=" << total_us << " wc=SUCCESS";
+                }
                 slice->markSuccess();
                 processed_slice_count++;
                 success_nr_polls++;
