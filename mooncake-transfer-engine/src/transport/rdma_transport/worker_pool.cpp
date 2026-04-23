@@ -344,6 +344,7 @@ void WorkerPool::performPollCq(int thread_id) {
                         << getServerNameFromNicPath(slice->peer_nic_path)
                         << " local_nic=" << context_.deviceName()
                         << " bytes=" << slice->length
+                        << " req_bytes=" << slice->task->total_bytes
                         << " total_us=" << total_us << " wc=SUCCESS";
                 }
                 slice->markSuccess();
