@@ -220,12 +220,14 @@ class Transport {
                     const auto sn_retry_total = task->retry_total;
                     const auto sn_submit_ts   = task->submit_ts;
                     const auto sn_finish_ts   = task->finish_ts;
-                    // peer_nic_path is a std::string inside the first slice;
-                    // copy by value so we don't dereference freed memory.
-                    const std::string sn_peer_path =
-                        task->slice_list.empty()
-                            ? std::string()
-                            : task->slice_list.front()->peer_nic_path;
+                    // Use 'this' slice's peer_nic_path. Dereferencing
+                    // task->slice_list.front() would jump through a Slice*
+                    // whose target may have been recycled via the
+                    // ThreadLocalSliceCache (and concurrently re-initialized
+                    // by another task), causing segfaults in the std::string
+                    // buffer pointer. 'this' is alive for the duration of
+                    // markSuccess() so reading our own field is safe.
+                    const std::string sn_peer_path = peer_nic_path;
 
                     LOG(WARNING)
                         << "TASK_SLOW req=" << sn_batch_id << ":" << sn_task
