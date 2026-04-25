@@ -196,32 +196,51 @@ class Transport {
             // slice_count.
             if (prev_completed + 1 == task->slice_count) {
                 task->finish_ts = getCurrentTimeInNano();
-                __atomic_store_n(&task->is_finished, true, __ATOMIC_RELAXED);
 
                 const int64_t elapsed_us =
                     task->submit_ts > 0
                         ? (task->finish_ts - task->submit_ts) / 1000
                         : 0;
+
+                // Snapshot + log BEFORE publishing is_finished, otherwise a
+                // poller observing is_finished may freeBatchID() and tear
+                // down `task` / `slice_list` underneath us. The release-store
+                // below pairs with any acquire load by the waiter so all
+                // writes above (including LOG-side reads) happen-before
+                // teardown.
                 if (elapsed_us > 0 &&
                     (uint64_t)elapsed_us >
                         globalConfig().slow_task_threshold_us) {
-                    const std::string &peer_path =
+                    const auto sn_batch_id    = task->batch_id;
+                    const void *const sn_task = task;
+                    const auto sn_total_bytes = task->total_bytes;
+                    const auto sn_slice_count = task->slice_count;
+                    const auto sn_success     = task->success_slice_count;
+                    const auto sn_failed      = task->failed_slice_count;
+                    const auto sn_retry_total = task->retry_total;
+                    const auto sn_submit_ts   = task->submit_ts;
+                    const auto sn_finish_ts   = task->finish_ts;
+                    // peer_nic_path is a std::string inside the first slice;
+                    // copy by value so we don't dereference freed memory.
+                    const std::string sn_peer_path =
                         task->slice_list.empty()
                             ? std::string()
                             : task->slice_list.front()->peer_nic_path;
+
                     LOG(WARNING)
-                        << "TASK_SLOW req=" << task->batch_id << ":"
-                        << static_cast<const void *>(task)
-                        << " peer=" << getServerNameFromNicPath(peer_path)
-                        << " total_bytes=" << task->total_bytes
-                        << " slice_count=" << task->slice_count
-                        << " success=" << task->success_slice_count
-                        << " failed=" << task->failed_slice_count
-                        << " retry_total=" << task->retry_total
-                        << " submit_ns=" << task->submit_ts
-                        << " finish_ns=" << task->finish_ts
+                        << "TASK_SLOW req=" << sn_batch_id << ":" << sn_task
+                        << " peer=" << getServerNameFromNicPath(sn_peer_path)
+                        << " total_bytes=" << sn_total_bytes
+                        << " slice_count=" << sn_slice_count
+                        << " success=" << sn_success
+                        << " failed=" << sn_failed
+                        << " retry_total=" << sn_retry_total
+                        << " submit_ns=" << sn_submit_ts
+                        << " finish_ns=" << sn_finish_ts
                         << " elapsed_us=" << elapsed_us;
                 }
+
+                __atomic_store_n(&task->is_finished, true, __ATOMIC_RELEASE);
 
 #ifdef USE_EVENT_DRIVEN_COMPLETION
                 // Increment the number of finished tasks in the batch

@@ -349,18 +349,13 @@ void WorkerPool::performPollCq(int thread_id) {
                         << (slice->opcode == Transport::TransferRequest::READ
                                 ? "READ"
                                 : "WRITE")
-                        << " client="
-                        << getServerNameFromNicPath(slice->local_nic_path)
-                        << " peer="
-                        << getServerNameFromNicPath(slice->peer_nic_path)
                         << " local_nic=" << slice->local_nic_path
                         << " peer_nic=" << slice->peer_nic_path
                         << " bytes=" << slice->length
                         << " req_bytes=" << slice->task->total_bytes
                         << " queue_us=" << queue_us << " wire_us=" << wire_us
                         << " total_us=" << total_us
-                        << " retry_cnt=" << slice->rdma.retry_cnt
-                        << " wc=SUCCESS";
+                        << " retry_cnt=" << slice->rdma.retry_cnt;
                 }
                 slice->markSuccess();
                 processed_slice_count++;
