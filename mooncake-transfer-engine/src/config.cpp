@@ -345,6 +345,26 @@ void loadGlobalConfig(GlobalConfig &config) {
             LOG(WARNING) << "Ignore value from environment variable "
                             "MC_IB_PCI_RELAXED_ORDERING, it should be 0|1|2";
     }
+
+    const char *slow_slice_env = std::getenv("MC_SLOW_SLICE_US");
+    if (slow_slice_env) {
+        int64_t val = atoll(slow_slice_env);
+        if (val >= 0)
+            config.slow_slice_threshold_us = (uint64_t)val;
+        else
+            LOG(WARNING)
+                << "Ignore value from environment variable MC_SLOW_SLICE_US";
+    }
+
+    const char *slow_task_env = std::getenv("MC_SLOW_TASK_US");
+    if (slow_task_env) {
+        int64_t val = atoll(slow_task_env);
+        if (val >= 0)
+            config.slow_task_threshold_us = (uint64_t)val;
+        else
+            LOG(WARNING)
+                << "Ignore value from environment variable MC_SLOW_TASK_US";
+    }
 }
 
 std::string mtuLengthToString(ibv_mtu mtu) {
@@ -395,6 +415,8 @@ void dumpGlobalConfig() {
     LOG(INFO) << "mtu_length = " << mtuLengthToString(config.mtu_length);
     LOG(INFO) << "parallel_reg_mr = " << config.parallel_reg_mr;
     LOG(INFO) << "ib_traffic_class = " << config.ib_traffic_class;
+    LOG(INFO) << "slow_slice_threshold_us = " << config.slow_slice_threshold_us;
+    LOG(INFO) << "slow_task_threshold_us = " << config.slow_task_threshold_us;
 }
 
 GlobalConfig &globalConfig() {

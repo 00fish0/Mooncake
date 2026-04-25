@@ -318,6 +318,10 @@ void WorkerPool::performPollCq(int thread_id) {
                     slice->markFailed();
                     processed_slice_count_++;
                 } else {
+                    __atomic_fetch_add(&slice->task->retry_total, 1,
+                                       __ATOMIC_RELAXED);
+                    slice->enqueue_ts = getCurrentTimeInNano();
+                    slice->ts = 0;
                     collective_slice_queue_[thread_id][slice->peer_nic_path]
                         .push_back(slice);
                     redispatch_counter_++;
@@ -327,11 +331,17 @@ void WorkerPool::performPollCq(int thread_id) {
             } else {
                 const uint64_t now_ns = getCurrentTimeInNano();
                 const int64_t post_ts = slice->ts;
-                const uint64_t total_us =
+                const int64_t enqueue_ts = slice->enqueue_ts;
+                const uint64_t wire_us =
                     (post_ts > 0 && now_ns > (uint64_t)post_ts)
                         ? (now_ns - (uint64_t)post_ts) / 1000
                         : 0;
-                if (total_us > 100000) {
+                const uint64_t queue_us =
+                    (enqueue_ts > 0 && post_ts > enqueue_ts)
+                        ? ((uint64_t)post_ts - (uint64_t)enqueue_ts) / 1000
+                        : 0;
+                const uint64_t total_us = queue_us + wire_us;
+                if (total_us > globalConfig().slow_slice_threshold_us) {
                     LOG(WARNING)
                         << "TRANSFER_SLOW req=" << slice->task->batch_id << ":"
                         << static_cast<const void *>(slice) << " t=" << now_ns
@@ -339,13 +349,18 @@ void WorkerPool::performPollCq(int thread_id) {
                         << (slice->opcode == Transport::TransferRequest::READ
                                 ? "READ"
                                 : "WRITE")
-                        << " client=" << context_.engine().local_server_name_
+                        << " client="
+                        << getServerNameFromNicPath(slice->local_nic_path)
                         << " peer="
                         << getServerNameFromNicPath(slice->peer_nic_path)
-                        << " local_nic=" << context_.deviceName()
+                        << " local_nic=" << slice->local_nic_path
+                        << " peer_nic=" << slice->peer_nic_path
                         << " bytes=" << slice->length
                         << " req_bytes=" << slice->task->total_bytes
-                        << " total_us=" << total_us << " wc=SUCCESS";
+                        << " queue_us=" << queue_us << " wire_us=" << wire_us
+                        << " total_us=" << total_us
+                        << " retry_cnt=" << slice->rdma.retry_cnt
+                        << " wc=SUCCESS";
                 }
                 slice->markSuccess();
                 processed_slice_count++;
@@ -398,6 +413,9 @@ void WorkerPool::redispatch(std::vector<Transport::Slice *> &slice_list,
                 MakeNicPath(peer_segment_desc->name,
                             peer_segment_desc->devices[device_id].name);
             slice->peer_nic_path = peer_nic_path;
+            __atomic_fetch_add(&slice->task->retry_total, 1, __ATOMIC_RELAXED);
+            slice->enqueue_ts = getCurrentTimeInNano();
+            slice->ts = 0;
             collective_slice_queue_[thread_id][peer_nic_path].push_back(slice);
         }
     }

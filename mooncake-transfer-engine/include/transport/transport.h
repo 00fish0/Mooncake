@@ -32,6 +32,7 @@
 #include <condition_variable>
 
 #include "common/base/status.h"
+#include "config.h"
 #include "transfer_metadata.h"
 
 namespace mooncake {
@@ -109,6 +110,7 @@ class Transport {
         TransferRequest::OpCode opcode;
         SegmentID target_id;
         std::string peer_nic_path;
+        std::string local_nic_path;
         SliceStatus status;
         TransferTask *task;
         std::vector<uint32_t> dest_rkeys;
@@ -171,6 +173,7 @@ class Transport {
         }
 
         volatile int64_t ts;
+        volatile int64_t enqueue_ts;
 
        private:
         inline void check_batch_completion(bool is_failed) {
@@ -179,6 +182,9 @@ class Transport {
             if (is_failed) {
                 batch_desc.has_failure.store(true, std::memory_order_relaxed);
             }
+#else
+            (void)is_failed;
+#endif
 
             // When the last slice of a task completes, check if the entire task
             // is done using a single atomic counter to avoid reading
@@ -189,8 +195,35 @@ class Transport {
             // Only the thread completing the final slice will see prev+1 ==
             // slice_count.
             if (prev_completed + 1 == task->slice_count) {
+                task->finish_ts = getCurrentTimeInNano();
                 __atomic_store_n(&task->is_finished, true, __ATOMIC_RELAXED);
 
+                const int64_t elapsed_us =
+                    task->submit_ts > 0
+                        ? (task->finish_ts - task->submit_ts) / 1000
+                        : 0;
+                if (elapsed_us > 0 &&
+                    (uint64_t)elapsed_us >
+                        globalConfig().slow_task_threshold_us) {
+                    const std::string &peer_path =
+                        task->slice_list.empty()
+                            ? std::string()
+                            : task->slice_list.front()->peer_nic_path;
+                    LOG(WARNING)
+                        << "TASK_SLOW req=" << task->batch_id << ":"
+                        << static_cast<const void *>(task)
+                        << " peer=" << getServerNameFromNicPath(peer_path)
+                        << " total_bytes=" << task->total_bytes
+                        << " slice_count=" << task->slice_count
+                        << " success=" << task->success_slice_count
+                        << " failed=" << task->failed_slice_count
+                        << " retry_total=" << task->retry_total
+                        << " submit_ns=" << task->submit_ts
+                        << " finish_ns=" << task->finish_ts
+                        << " elapsed_us=" << elapsed_us;
+                }
+
+#ifdef USE_EVENT_DRIVEN_COMPLETION
                 // Increment the number of finished tasks in the batch
                 // (relaxed). This counter does not itself publish data; only
                 // the thread that observes the last task completion performs
@@ -223,8 +256,8 @@ class Transport {
                     // only to block again on the mutex.
                     batch_desc.completion_cv.notify_all();
                 }
-            }
 #endif
+            }
         }
     };
 
@@ -286,13 +319,15 @@ class Transport {
         uint64_t total_bytes = 0;
         BatchID batch_id = 0;
 
+        int64_t submit_ts = 0;
+        int64_t finish_ts = 0;
+        volatile uint64_t retry_total = 0;
+
 #ifdef WITH_METRICS
         std::chrono::steady_clock::time_point start_time;
 #endif
 
-#ifdef USE_EVENT_DRIVEN_COMPLETION
         volatile uint64_t completed_slice_count = 0;
-#endif
 
         // record the origin request
 #ifdef USE_ASCEND_HETEROGENEOUS

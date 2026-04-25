@@ -64,6 +64,8 @@ struct GlobalConfig {
     // ib_pci_relaxed_ordering_mode: 0: off, 1: on if supported, 2: auto
     int ib_pci_relaxed_ordering_mode = 0;
     bool ascend_use_fabric_mem = false;
+    uint64_t slow_slice_threshold_us = 100000;
+    uint64_t slow_task_threshold_us = 500000;
 };
 
 struct RpcCommunicatorConfig {

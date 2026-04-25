@@ -460,6 +460,7 @@ Status RdmaTransport::submitTransferTask(
     for (size_t index = 0; index < task_list.size(); ++index) {
         assert(task_list[index]);
         auto &task = *task_list[index];
+        if (task.submit_ts == 0) task.submit_ts = getCurrentTimeInNano();
         nr_slices = 0;
         assert(task.request);
         auto &request = *task.request;
@@ -494,6 +495,8 @@ Status RdmaTransport::submitTransferTask(
             slice->target_id = request.target_id;
             slice->status = Slice::PENDING;
             slice->ts = 0;
+            slice->enqueue_ts = getCurrentTimeInNano();
+            slice->local_nic_path.clear();
             task.slice_list.push_back(slice);
 
             int buffer_id = -1, device_id = -1,
@@ -542,6 +545,8 @@ Status RdmaTransport::submitTransferTask(
                 }
                 slice->rdma.source_lkey =
                     local_segment_desc->buffers[buffer_id].lkey[device_id];
+                slice->local_nic_path =
+                    MakeNicPath(local_server_name_, context->deviceName());
                 slices_to_post[context].push_back(slice);
                 task.total_bytes += slice->length;
                 __sync_fetch_and_add(&task.slice_count, 1);
