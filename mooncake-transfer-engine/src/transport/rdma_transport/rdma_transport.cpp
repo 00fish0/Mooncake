@@ -585,7 +585,8 @@ Status RdmaTransport::getTransferStatus(BatchID batch_id,
                 status[task_id].s = TransferStatusEnum::FAILED;
             else
                 status[task_id].s = TransferStatusEnum::COMPLETED;
-            task.is_finished = true;
+            markTaskFinishedAndMaybeLog(task, success_slice_count,
+                                        failed_slice_count);
         } else {
             status[task_id].s = TransferStatusEnum::WAITING;
         }
@@ -611,7 +612,8 @@ Status RdmaTransport::getTransferStatus(BatchID batch_id, size_t task_id,
             status.s = TransferStatusEnum::FAILED;
         else
             status.s = TransferStatusEnum::COMPLETED;
-        task.is_finished = true;
+        markTaskFinishedAndMaybeLog(task, success_slice_count,
+                                    failed_slice_count);
     } else {
         status.s = TransferStatusEnum::WAITING;
     }

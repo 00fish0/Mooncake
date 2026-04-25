@@ -177,108 +177,43 @@ class Transport {
 
        private:
         inline void check_batch_completion(bool is_failed) {
+            // Important: do NOT dereference `task` here in the non
+            // USE_EVENT_DRIVEN_COMPLETION build. The publication points for
+            // task completion are markSuccess()'s success_slice_count.fetch_add
+            // and markFailed()'s failed_slice_count.fetch_add, which run
+            // BEFORE this function is called. The polling side
+            // (RdmaTransport::getTransferStatus etc.) sees
+            // success+failed == slice_count and may immediately freeBatchID(),
+            // tearing down `task` and its slice_list under us. Any task->...
+            // access here is UAF.
+            //
+            // TASK_SLOW logging is therefore moved to the polling side, where
+            // task is guaranteed alive (the caller holds batch_id). See
+            // Transport::markTaskFinishedAndMaybeLog below.
 #ifdef USE_EVENT_DRIVEN_COMPLETION
             auto &batch_desc = toBatchDesc(task->batch_id);
             if (is_failed) {
                 batch_desc.has_failure.store(true, std::memory_order_relaxed);
             }
-#else
-            (void)is_failed;
-#endif
 
-            // When the last slice of a task completes, check if the entire task
-            // is done using a single atomic counter to avoid reading
-            // inconsistent results.
             uint64_t prev_completed = __atomic_fetch_add(
                 &task->completed_slice_count, 1, __ATOMIC_RELAXED);
-
-            // Only the thread completing the final slice will see prev+1 ==
-            // slice_count.
             if (prev_completed + 1 == task->slice_count) {
-                task->finish_ts = getCurrentTimeInNano();
-
-                const int64_t elapsed_us =
-                    task->submit_ts > 0
-                        ? (task->finish_ts - task->submit_ts) / 1000
-                        : 0;
-
-                // Snapshot + log BEFORE publishing is_finished, otherwise a
-                // poller observing is_finished may freeBatchID() and tear
-                // down `task` / `slice_list` underneath us. The release-store
-                // below pairs with any acquire load by the waiter so all
-                // writes above (including LOG-side reads) happen-before
-                // teardown.
-                if (elapsed_us > 0 &&
-                    (uint64_t)elapsed_us >
-                        globalConfig().slow_task_threshold_us) {
-                    const auto sn_batch_id    = task->batch_id;
-                    const void *const sn_task = task;
-                    const auto sn_total_bytes = task->total_bytes;
-                    const auto sn_slice_count = task->slice_count;
-                    const auto sn_success     = task->success_slice_count;
-                    const auto sn_failed      = task->failed_slice_count;
-                    const auto sn_retry_total = task->retry_total;
-                    const auto sn_submit_ts   = task->submit_ts;
-                    const auto sn_finish_ts   = task->finish_ts;
-                    // Use 'this' slice's peer_nic_path. Dereferencing
-                    // task->slice_list.front() would jump through a Slice*
-                    // whose target may have been recycled via the
-                    // ThreadLocalSliceCache (and concurrently re-initialized
-                    // by another task), causing segfaults in the std::string
-                    // buffer pointer. 'this' is alive for the duration of
-                    // markSuccess() so reading our own field is safe.
-                    const std::string sn_peer_path = peer_nic_path;
-
-                    LOG(WARNING)
-                        << "TASK_SLOW req=" << sn_batch_id << ":" << sn_task
-                        << " peer=" << getServerNameFromNicPath(sn_peer_path)
-                        << " total_bytes=" << sn_total_bytes
-                        << " slice_count=" << sn_slice_count
-                        << " success=" << sn_success
-                        << " failed=" << sn_failed
-                        << " retry_total=" << sn_retry_total
-                        << " submit_ns=" << sn_submit_ts
-                        << " finish_ns=" << sn_finish_ts
-                        << " elapsed_us=" << elapsed_us;
-                }
-
-                __atomic_store_n(&task->is_finished, true, __ATOMIC_RELEASE);
-
-#ifdef USE_EVENT_DRIVEN_COMPLETION
-                // Increment the number of finished tasks in the batch
-                // (relaxed). This counter does not itself publish data; only
-                // the thread that observes the last task completion performs
-                // the release-store on batch_desc.is_finished below. The waiter
-                // pairs this with an acquire load, which makes all prior writes
-                // (including relaxed increments) visible.
-                //
-                // check if this is the last task in the batch
                 auto prev = batch_desc.finished_task_count.fetch_add(
                     1, std::memory_order_relaxed);
-
-                // Last task in the batch: wake up waiting thread directly
                 if (prev + 1 == batch_desc.batch_size) {
-                    // Publish completion of the entire batch under the same
-                    // mutex used by the waiter to avoid lost notifications.
-                    //
-                    // Keep a release-store because the reader has a fast path
-                    // that may observe completion without taking the mutex. The
-                    // acquire load in that fast path pairs with this release to
-                    // make all prior updates visible. For the predicate checked
-                    // under the mutex, relaxed would suffice since the mutex
-                    // acquire provides the necessary visibility.
                     {
                         std::lock_guard<std::mutex> lock(
                             batch_desc.completion_mutex);
                         batch_desc.is_finished.store(true,
                                                      std::memory_order_release);
                     }
-                    // Notify after releasing the lock to avoid waking threads
-                    // only to block again on the mutex.
                     batch_desc.completion_cv.notify_all();
                 }
-#endif
             }
+#else
+            (void)is_failed;
+#endif
         }
     };
 
@@ -390,6 +325,61 @@ class Transport {
     };
 
    public:
+    /// Atomically transition task.is_finished from false to true and, if this
+    /// caller wins the transition and the task's elapsed time exceeds
+    /// slow_task_threshold_us, emit a TASK_SLOW log line.
+    ///
+    /// Safe to call from polling threads (RdmaTransport::getTransferStatus,
+    /// MultiTransport::getTransferStatus, etc.) because the poller holds the
+    /// batch_id and the task is therefore alive for the duration of the call:
+    ///   - task itself is part of BatchDesc::task_list (vector<TransferTask>),
+    ///     not freed until freeBatchID, which the caller has not yet invoked.
+    ///   - task.slice_list[0] is a Slice* whose target lifetime is bound to
+    ///     ~TransferTask (slice cache deallocate); since task is alive, all
+    ///     slice_list entries are still valid.
+    ///   - CAS guarantees the LOG fires exactly once per task even under
+    ///     concurrent polling.
+    ///
+    /// finish_ts is captured at the moment the polling thread observes
+    /// completion. This is delayed by the poll latency relative to the actual
+    /// last-slice completion, but for slow-task detection (where the threshold
+    /// is typically >= 1us and meaningful values are ms-scale) the delta is
+    /// negligible.
+    static inline void markTaskFinishedAndMaybeLog(
+        TransferTask &task,
+        uint64_t success_slice_count,
+        uint64_t failed_slice_count) {
+        bool expected = false;
+        if (!__atomic_compare_exchange_n(
+                &task.is_finished, &expected, true,
+                /*weak=*/false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            return;  // Another poller already marked it finished.
+        }
+        if (task.submit_ts <= 0) return;
+        const int64_t finish_ts = getCurrentTimeInNano();
+        const int64_t elapsed_us = (finish_ts - task.submit_ts) / 1000;
+        if (elapsed_us <= 0 ||
+            (uint64_t)elapsed_us <= globalConfig().slow_task_threshold_us) {
+            return;
+        }
+        const std::string peer_path =
+            task.slice_list.empty()
+                ? std::string()
+                : task.slice_list.front()->peer_nic_path;
+        LOG(WARNING)
+            << "TASK_SLOW req=" << task.batch_id << ":"
+            << static_cast<const void *>(&task)
+            << " peer=" << getServerNameFromNicPath(peer_path)
+            << " total_bytes=" << task.total_bytes
+            << " slice_count=" << task.slice_count
+            << " success=" << success_slice_count
+            << " failed=" << failed_slice_count
+            << " retry_total=" << task.retry_total
+            << " submit_ns=" << task.submit_ts
+            << " finish_ns=" << finish_ts
+            << " elapsed_us=" << elapsed_us;
+    }
+
     virtual ~Transport() {}
 
     /// @brief Create a batch with specified maximum outstanding transfers.
