@@ -6,6 +6,7 @@ set(MOONCAKE_STORE_SOURCES
     master_service.cpp
     client_service.cpp
     client_metric.cpp
+    tracing.cpp
     types.cpp
     master_client.cpp
     utils.cpp
@@ -250,6 +251,20 @@ target_link_libraries(
   PUBLIC cachelib_memory_allocator ${ETCD_WRAPPER_LIB} glog::glog gflags::gflags
          ${EXTRA_LIBS} ${SPDK_STATIC_LIBS} asio_shared
   PRIVATE transfer_engine)
+
+# Distributed tracing (OpenTelemetry). tracing.cpp is always compiled but is a
+# no-op unless WITH_TRACING is ON, in which case it links otel-cpp + libcurl and
+# gets the WITH_TRACING compile definition. Point CMake at the otel-cpp install
+# via -DCMAKE_PREFIX_PATH when enabling.
+option(WITH_TRACING "Enable OpenTelemetry distributed tracing in master/client" OFF)
+if(WITH_TRACING)
+  find_package(opentelemetry-cpp CONFIG REQUIRED)
+  find_package(CURL REQUIRED)
+  target_compile_definitions(mooncake_store PRIVATE WITH_TRACING)
+  target_link_libraries(mooncake_store PUBLIC
+    opentelemetry-cpp::trace opentelemetry-cpp::resources CURL::libcurl)
+  message(STATUS "Mooncake distributed tracing (OpenTelemetry) enabled")
+endif()
 if(STORE_USE_ETCD)
   add_dependencies(mooncake_store build_etcd_wrapper)
 endif()
@@ -300,6 +315,21 @@ add_executable(mooncake_client real_client_main.cpp)
 # Client needs transfer_engine for data transfer operations
 target_link_libraries(mooncake_client PRIVATE mooncake_store transfer_engine
                                               asio_shared)
+
+# Tiny client to validate distributed tracing end-to-end against a real master.
+if(WITH_TRACING)
+  add_executable(mc_trace_test mc_trace_test.cpp)
+  target_link_libraries(mc_trace_test PRIVATE mooncake_store transfer_engine
+                                              asio_shared)
+  # Full store e2e driver: put/get/exist over the real data path (TCP).
+  add_executable(mc_e2e_test mc_e2e_test.cpp)
+  target_link_libraries(mc_e2e_test PRIVATE mooncake_store transfer_engine
+                                            asio_shared)
+  # Concurrent stress driver to observe traces under load.
+  add_executable(mc_stress mc_stress.cpp)
+  target_link_libraries(mc_stress PRIVATE mooncake_store transfer_engine
+                                          asio_shared)
+endif()
 
 # Optimize binary sizes only in Release mode
 string(TOUPPER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_UPPER)

@@ -7,6 +7,7 @@
 #include <ylt/reflection/user_reflect_macro.hpp>
 #include <ylt/util/tl/expected.hpp>
 
+#include "tracing.h"
 #include "types.h"
 #include "utils/scoped_vlog_timer.h"
 
@@ -43,6 +44,10 @@ auto execute_rpc(std::string_view rpc_name, RpcCallable&& rpc_call,
                  IncReqMetric&& inc_req_metric, IncFailMetric&& inc_fail_metric)
     requires TlExpected<std::invoke_result_t<RpcCallable>>
 {
+    // Server-side distributed-tracing span for every RPC that goes through this
+    // helper. Reads the W3C traceparent from the coro_rpc request attachment and
+    // parents the span to the remote caller. No-op unless built -DWITH_TRACING.
+    mooncake::tracing::ServerSpanScope _trace(rpc_name);
     ScopedVLogTimer timer(1, rpc_name.data());
     log_request(timer);
 

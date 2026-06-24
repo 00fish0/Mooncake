@@ -12,6 +12,7 @@
 
 #include "mutex.h"
 #include "rpc_service.h"
+#include "tracing.h"
 #include "types.h"
 #include "utils/scoped_vlog_timer.h"
 #include "master_metric_manager.h"
@@ -326,14 +327,21 @@ tl::expected<ReturnType, ErrorCode> MasterClient::invoke_rpc(Args&&... args) {
         metrics_->rpc_count.inc({RpcNameTraits<ServiceMethod>::value});
     }
 
+    // Client-side distributed-tracing span. Its W3C traceparent rides in the
+    // coro_rpc request attachment; the master parents its server span to it.
+    // No-op unless built -DWITH_TRACING.
+    mooncake::tracing::ClientSpanScope _trace(RpcNameTraits<ServiceMethod>::value);
+
     auto start_time = std::chrono::steady_clock::now();
     return async_simple::coro::syncAwait(
         [&]() -> async_simple::coro::Lazy<tl::expected<ReturnType, ErrorCode>> {
             auto ret = co_await pool->send_request(
                 [&](coro_io::client_reuse_hint,
                     coro_rpc::coro_rpc_client& client) {
-                    return client.send_request<ServiceMethod>(
-                        std::forward<Args>(args)...);
+                    // send_request<func>(Args...) ignores set_req_attachment;
+                    // the attachment must go through send_request_with_attachment.
+                    return client.send_request_with_attachment<ServiceMethod>(
+                        _trace.traceparent(), std::forward<Args>(args)...);
                 });
             if (!ret.has_value()) {
                 LOG(ERROR) << "Client not available";
@@ -366,6 +374,9 @@ std::vector<tl::expected<ResultType, ErrorCode>> MasterClient::invoke_batch_rpc(
         metrics_->rpc_count.inc({RpcNameTraits<ServiceMethod>::value});
     }
 
+    // Client-side distributed-tracing span (batch RPCs). No-op unless -DWITH_TRACING.
+    mooncake::tracing::ClientSpanScope _trace(RpcNameTraits<ServiceMethod>::value);
+
     auto start_time = std::chrono::steady_clock::now();
     return async_simple::coro::syncAwait(
         [&]() -> async_simple::coro::Lazy<
@@ -373,8 +384,8 @@ std::vector<tl::expected<ResultType, ErrorCode>> MasterClient::invoke_batch_rpc(
             auto ret = co_await pool->send_request(
                 [&](coro_io::client_reuse_hint,
                     coro_rpc::coro_rpc_client& client) {
-                    return client.send_request<ServiceMethod>(
-                        std::forward<Args>(args)...);
+                    return client.send_request_with_attachment<ServiceMethod>(
+                        _trace.traceparent(), std::forward<Args>(args)...);
                 });
             if (!ret.has_value()) {
                 LOG(ERROR) << "Client not available";

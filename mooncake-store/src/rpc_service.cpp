@@ -851,6 +851,7 @@ tl::expected<bool, ErrorCode> WrappedMasterService::ExistKey(
 
 std::vector<tl::expected<bool, ErrorCode>> WrappedMasterService::BatchExistKey(
     const std::vector<std::string>& keys, const std::string& tenant_id) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchExistKey");
     ScopedVLogTimer timer(1, "BatchExistKey");
     const size_t total_keys = keys.size();
     timer.LogRequest("keys_count=", total_keys);
@@ -858,8 +859,12 @@ std::vector<tl::expected<bool, ErrorCode>> WrappedMasterService::BatchExistKey(
 
     std::vector<tl::expected<bool, ErrorCode>> result;
     result.reserve(keys.size());
-    for (const auto& key : keys) {
-        result.emplace_back(master_service_.ExistKey(key, tenant_id));
+    {
+        // P2 demo: a child sub-step span nested under the BatchExistKey RPC span.
+        mooncake::tracing::ServerSpanScope::Step _step("lookup_keys");
+        for (const auto& key : keys) {
+            result.emplace_back(master_service_.ExistKey(key, tenant_id));
+        }
     }
 
     size_t failure_count = 0;
@@ -890,6 +895,7 @@ tl::expected<
     std::unordered_map<UUID, std::vector<std::string>, boost::hash<UUID>>,
     ErrorCode>
 WrappedMasterService::BatchQueryIp(const std::vector<UUID>& client_ids) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchQueryIp");
     ScopedVLogTimer timer(1, "BatchQueryIp");
     const size_t total_client_ids = client_ids.size();
     timer.LogRequest("client_ids_count=", total_client_ids);
@@ -930,6 +936,7 @@ tl::expected<std::vector<std::string>, ErrorCode>
 WrappedMasterService::BatchReplicaClear(
     const std::vector<std::string>& object_keys, const UUID& client_id,
     const std::string& segment_name) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchReplicaClear");
     ScopedVLogTimer timer(1, "BatchReplicaClear");
     const size_t total_keys = object_keys.size();
     timer.LogRequest("object_keys_count=", total_keys,
@@ -999,6 +1006,7 @@ WrappedMasterService::GetReplicaList(const std::string& key,
 std::vector<tl::expected<GetReplicaListResponse, ErrorCode>>
 WrappedMasterService::BatchGetReplicaList(const std::vector<std::string>& keys,
                                           const std::string& tenant_id) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchGetReplicaList");
     ScopedVLogTimer timer(1, "BatchGetReplicaList");
     const size_t total_keys = keys.size();
     timer.LogRequest("keys_count=", total_keys);
@@ -1101,6 +1109,7 @@ WrappedMasterService::BatchPutStart(const UUID& client_id,
                                     const std::vector<uint64_t>& slice_lengths,
                                     const ReplicateConfig& config,
                                     const std::string& tenant_id) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchPutStart");
     ScopedVLogTimer timer(1, "BatchPutStart");
     const size_t total_keys = keys.size();
     timer.LogRequest("client_id=", client_id, ", keys_count=", total_keys);
@@ -1193,6 +1202,7 @@ WrappedMasterService::BatchPutStart(const UUID& client_id,
 std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutEnd(
     const UUID& client_id, const std::vector<std::string>& keys,
     ReplicaType replica_type, const std::string& tenant_id) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchPutEnd");
     ScopedVLogTimer timer(1, "BatchPutEnd");
     const size_t total_keys = keys.size();
     timer.LogRequest("client_id=", client_id, ", keys_count=", total_keys);
@@ -1233,6 +1243,7 @@ std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutEnd(
 std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutRevoke(
     const UUID& client_id, const std::vector<std::string>& keys,
     ReplicaType replica_type, const std::string& tenant_id) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchPutRevoke");
     ScopedVLogTimer timer(1, "BatchPutRevoke");
     const size_t total_keys = keys.size();
     timer.LogRequest("client_id=", client_id, ", keys_count=", total_keys);
@@ -1328,6 +1339,7 @@ WrappedMasterService::BatchUpsertStart(
     const UUID& client_id, const std::vector<std::string>& keys,
     const std::vector<uint64_t>& slice_lengths, const ReplicateConfig& config,
     const std::string& tenant_id) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchUpsertStart");
     ScopedVLogTimer timer(1, "BatchUpsertStart");
     const size_t total_keys = keys.size();
     timer.LogRequest("client_id=", client_id, ", keys_count=", total_keys);
@@ -1363,6 +1375,7 @@ WrappedMasterService::BatchUpsertStart(
 std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchUpsertEnd(
     const UUID& client_id, const std::vector<std::string>& keys,
     const std::string& tenant_id) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchUpsertEnd");
     ScopedVLogTimer timer(1, "BatchUpsertEnd");
     const size_t total_keys = keys.size();
     timer.LogRequest("client_id=", client_id, ", keys_count=", total_keys);
@@ -1398,6 +1411,7 @@ std::vector<tl::expected<void, ErrorCode>>
 WrappedMasterService::BatchUpsertRevoke(const UUID& client_id,
                                         const std::vector<std::string>& keys,
                                         const std::string& tenant_id) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchUpsertRevoke");
     ScopedVLogTimer timer(1, "BatchUpsertRevoke");
     const size_t total_keys = keys.size();
     timer.LogRequest("client_id=", client_id, ", keys_count=", total_keys);
@@ -1463,6 +1477,7 @@ long WrappedMasterService::RemoveAll(bool force, const std::string& tenant_id) {
 std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchRemove(
     const std::vector<std::string>& keys, bool force,
     const std::string& tenant_id) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchRemove");
     ScopedVLogTimer timer(1, "BatchRemove");
     const size_t total_keys = keys.size();
     timer.LogRequest("keys_count=", total_keys, ", force=", force);
@@ -1741,6 +1756,7 @@ std::vector<tl::expected<void, ErrorCode>>
 WrappedMasterService::BatchEvictDiskReplica(
     const UUID& client_id, const std::vector<std::string>& keys,
     const std::string& tenant_id, ReplicaType replica_type) {
+    mooncake::tracing::ServerSpanScope _mc_trace("BatchEvictDiskReplica");
     ScopedVLogTimer timer(1, "BatchEvictDiskReplica");
     const size_t total_keys = keys.size();
     timer.LogRequest("client_id=", client_id, ", keys_count=", total_keys,

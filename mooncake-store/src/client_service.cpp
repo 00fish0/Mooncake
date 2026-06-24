@@ -38,6 +38,7 @@
 #include "rpc_types.h"
 #include "local_hot_cache.h"
 #include "gpu_staging_utils.h"
+#include "tracing.h"
 
 namespace mooncake {
 
@@ -930,6 +931,7 @@ std::optional<std::shared_ptr<Client>> Client::Create(
 
 tl::expected<void, ErrorCode> Client::Get(const std::string& object_key,
                                           std::vector<Slice>& slices) {
+    mooncake::tracing::OpScope _op("Client::Get");
     auto query_result = Query(object_key);
     if (!query_result) {
         return tl::unexpected(query_result.error());
@@ -1479,6 +1481,7 @@ bool Client::RedirectToHotCache(const std::string& key,
 tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
                                           std::vector<Slice>& slices,
                                           const ReplicateConfig& config) {
+    mooncake::tracing::OpScope _op("Client::Put");
     // Prepare slice lengths
     std::vector<size_t> slice_lengths;
     for (size_t i = 0; i < slices.size(); ++i) {
@@ -2934,6 +2937,7 @@ tl::expected<void, ErrorCode> Client::unregisterLocalMemory(
 }
 
 tl::expected<bool, ErrorCode> Client::IsExist(const std::string& key) {
+    mooncake::tracing::OpScope _op("Client::IsExist");
     auto result = master_client_.ExistKey(key);
     return result;
 }
@@ -3391,6 +3395,7 @@ void Client::PutToLocalFile(const std::string& key,
 ErrorCode Client::TransferData(const Replica::Descriptor& replica_descriptor,
                                std::vector<Slice>& slices,
                                TransferRequest::OpCode op_code) {
+    mooncake::tracing::OpScope _xfer("data_transfer");
     if (!transfer_submitter_) {
         LOG(ERROR) << "TransferSubmitter not initialized";
         return ErrorCode::INVALID_PARAMS;

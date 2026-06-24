@@ -15,6 +15,7 @@
 
 #include "http_metadata_server.h"
 #include "rpc_service.h"
+#include "tracing.h"
 #include "types.h"
 #include "utils.h"
 
@@ -69,6 +70,10 @@ DEFINE_int32(
     "Maximum number of threads to use (deprecated, use rpc_thread_num)");
 DEFINE_bool(enable_metric_reporting, true, "Enable periodic metric reporting");
 DEFINE_int32(metrics_port, 9003, "Port for HTTP metrics server to listen on");
+DEFINE_string(otlp_endpoint, "",
+              "OTLP/HTTP traces endpoint for distributed tracing, e.g. "
+              "http://127.0.0.1:4318/v1/traces. Empty disables tracing. "
+              "Requires building with -DWITH_TRACING=ON.");
 DEFINE_string(default_kv_lease_ttl, kDefaultKvLeaseTtlFlagValue,
               "Default lease time for kv objects. Supports raw milliseconds "
               "or duration strings with ms, s, m, or h suffixes");
@@ -952,6 +957,10 @@ int main(int argc, char* argv[]) {
     // Initialize gflags
     gflags::SetVersionString(mooncake::MOONCAKE_DISPLAY_VERSION);
     gflags::ParseCommandLineFlags(&argc, &argv, true);
+
+    // Initialize distributed tracing (no-op unless built -DWITH_TRACING and
+    // --otlp_endpoint is set).
+    mooncake::tracing::InitTracing("mooncake-master", FLAGS_otlp_endpoint);
 
     if (!FLAGS_log_dir.empty()) {
         google::InitGoogleLogging(argv[0]);
