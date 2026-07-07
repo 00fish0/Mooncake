@@ -3732,10 +3732,7 @@ auto MasterService::AddReplica(const UUID& client_id, const std::string& key,
     const bool replacing_existing =
         metadata.HasReplica(&Replica::fn_is_local_disk_replica);
 
-    // HA strong consistency: build the post-mutation replica descriptor list
-    // and persist OpLog BEFORE applying the local mutation. If persist fails,
-    // metadata stays untouched.
-    if (enable_ha_ && oplog_store_) {
+    if (enable_ha_ && (oplog_store_ || ordered_oplog_writer_)) {
         std::vector<Replica::Descriptor> post;
         for (const auto& existing : metadata.GetAllReplicas()) {
             if (existing.status() != ReplicaStatus::COMPLETE) continue;
@@ -3764,7 +3761,7 @@ auto MasterService::AddReplica(const UUID& client_id, const std::string& key,
             post.push_back(replica.get_descriptor());
         }
 
-        auto persist_result = AppendOpLogAndNotifyDurableOrAbort(
+        auto persist_result = AppendOpLogVisibleBeforeDurable(
             OpType::PUT_END, tenant_id, key,
             SerializeMetadataForOpLogFromReplicaDescriptors(
                 metadata.client_id, metadata.size, post, metadata.group_id,
