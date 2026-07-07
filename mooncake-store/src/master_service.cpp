@@ -3686,9 +3686,14 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
     metadata.GrantLease(0, default_kv_soft_pin_ttl_);
     PublishKvStored(key, replica_type, metadata, tenant_id);
 
-    if (enable_ha_ && oplog_store_) {
+    if (enable_ha_ && (oplog_store_ || ordered_oplog_writer_)) {
         std::string payload = SerializeMetadataForOpLog(metadata);
-        AppendOpLogAndNotify(OpType::PUT_END, tenant_id, key, payload);
+        auto result = AppendOpLogVisibleBeforeDurable(OpType::PUT_END,
+                                                      tenant_id, key, payload);
+        if (!result) {
+            LOG(WARNING) << "PutEnd: OpLog queue failed for key=" << key
+                         << ", err=" << static_cast<int>(result.error());
+        }
     }
     return {};
 }
