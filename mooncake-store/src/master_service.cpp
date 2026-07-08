@@ -2039,7 +2039,7 @@ void MasterService::ClearInvalidHandles(
             auto it = tenant_state.metadata.begin();
             while (it != tenant_state.metadata.end()) {
                 if (CleanupStaleHandles(it->second, alive_clients, &shard)) {
-                    if (enable_ha_ && oplog_store_) {
+                    if (enable_ha_ && (oplog_store_ || ordered_oplog_writer_)) {
                         auto err = PersistRemoveForHA(
                             "ClearInvalidHandles(last replica)",
                             tenant_it->first, it->first);
@@ -2052,16 +2052,15 @@ void MasterService::ClearInvalidHandles(
                                        QuotaEraseMode::kFull, &shard);
                 } else {
                     // Still has valid replicas (disk/local), write PUT_END
-                    if (enable_ha_ && oplog_store_ &&
+                    if (enable_ha_ && (oplog_store_ || ordered_oplog_writer_) &&
                         it->second.HasReplica([](const Replica& r) {
                             return !r.is_memory_replica() ||
                                    !r.has_invalid_mem_handle();
                         })) {
-                        auto persist_result =
-                            AppendOpLogAndNotifyDurableOrAbort(
-                                OpType::PUT_END, tenant_it->first, it->first,
-                                SerializeMetadataForOpLogWithoutMemReplicas(
-                                    it->second));
+                        auto persist_result = AppendOpLogAndWaitDurable(
+                            OpType::PUT_END, tenant_it->first, it->first,
+                            SerializeMetadataForOpLogWithoutMemReplicas(
+                                it->second));
                         if (!persist_result) {
                             ++it;
                             continue;
@@ -3836,7 +3835,7 @@ auto MasterService::PutRevoke(const UUID& client_id, const std::string& key,
         return tl::make_unexpected(ErrorCode::INVALID_WRITE);
     }
 
-    if (enable_ha_ && oplog_store_) {
+    if (enable_ha_ && (oplog_store_ || ordered_oplog_writer_)) {
         auto remaining = BuildRemainingReplicaDescriptors(
             metadata, [replica_type](const Replica& r) {
                 if (replica_type == ReplicaType::ALL) {
@@ -3847,14 +3846,15 @@ auto MasterService::PutRevoke(const UUID& client_id, const std::string& key,
 
         tl::expected<OpLogEntry, ErrorCode> persist_result;
         if (remaining.empty()) {
-            persist_result = AppendOpLogAndNotifyDurableOrAbort(
-                OpType::REMOVE, tenant_id, key, {});
+            persist_result = AppendOpLogWithDurableFinalize(
+                OpType::REMOVE, tenant_id, key, {}, nullptr);
         } else {
-            persist_result = AppendOpLogAndNotifyDurableOrAbort(
+            persist_result = AppendOpLogWithDurableFinalize(
                 OpType::PUT_END, tenant_id, key,
                 SerializeMetadataForOpLogFromReplicaDescriptors(
                     metadata.client_id, metadata.size, remaining,
-                    metadata.group_id, metadata.data_type));
+                    metadata.group_id, metadata.data_type),
+                nullptr);
         }
         if (!persist_result) {
             return tl::make_unexpected(persist_result.error());
@@ -4611,7 +4611,7 @@ tl::expected<void, ErrorCode> MasterService::CopyEnd(
         }
     }
 
-    if (enable_ha_ && oplog_store_) {
+    if (enable_ha_ && (oplog_store_ || ordered_oplog_writer_)) {
         // Build post-mutation descriptors: existing COMPLETE replicas plus
         // the targets that are about to be marked COMPLETE.
         std::vector<Replica::Descriptor> post;
@@ -4628,7 +4628,7 @@ tl::expected<void, ErrorCode> MasterService::CopyEnd(
             }
         }
 
-        auto persist_result = AppendOpLogAndNotifyDurableOrAbort(
+        auto persist_result = AppendOpLogAndWaitDurable(
             OpType::PUT_END, tenant_id, key,
             SerializeMetadataForOpLogFromReplicaDescriptors(
                 metadata.client_id, metadata.size, post, metadata.group_id,
@@ -4926,7 +4926,7 @@ tl::expected<void, ErrorCode> MasterService::MoveEnd(
         }
     }
 
-    if (enable_ha_ && oplog_store_) {
+    if (enable_ha_ && (oplog_store_ || ordered_oplog_writer_)) {
         // Build post-mutation descriptors:
         //   - existing COMPLETE replicas, except the source (about to be
         //   popped)
@@ -4945,7 +4945,7 @@ tl::expected<void, ErrorCode> MasterService::MoveEnd(
             }
         }
 
-        auto persist_result = AppendOpLogAndNotifyDurableOrAbort(
+        auto persist_result = AppendOpLogAndWaitDurable(
             OpType::PUT_END, tenant_id, key,
             SerializeMetadataForOpLogFromReplicaDescriptors(
                 metadata.client_id, metadata.size, post, metadata.group_id,
@@ -10124,6 +10124,11 @@ tl::expected<uint64_t, ErrorCode> MasterService::AppendOpLogAndNotifyDurable(
 
 ErrorCode MasterService::PersistOpLogEntryWithSyncRetries(
     const OpLogEntry& entry) const {
+    if (use_batch_oplog_) {
+        LOG(ERROR) << "batch-record OpLog mode attempted legacy persist, seq="
+                   << entry.sequence_id;
+        return ErrorCode::INTERNAL_ERROR;
+    }
     if (!oplog_store_) {
         LOG(ERROR) << "OpLogStore not available, cannot persist entry seq="
                    << entry.sequence_id;
