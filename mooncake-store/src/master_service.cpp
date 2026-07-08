@@ -6152,7 +6152,7 @@ auto MasterService::NotifyPromotionSuccess(const UUID& client_id,
     Replica* staged = metadata.GetReplicaByID(task_it->second.alloc_id);
     if (staged != nullptr && staged->is_memory_replica() &&
         staged->is_processing()) {
-        if (enable_ha_ && oplog_store_) {
+        if (enable_ha_ && (oplog_store_ || ordered_oplog_writer_)) {
             // Build post-mutation descriptors: existing COMPLETE replicas plus
             // the staged replica flipped to COMPLETE.
             std::vector<Replica::Descriptor> post;
@@ -6166,7 +6166,7 @@ auto MasterService::NotifyPromotionSuccess(const UUID& client_id,
                 }
             }
 
-            auto persist_result = AppendOpLogAndNotifyDurableOrAbort(
+            auto persist_result = AppendOpLogVisibleBeforeDurable(
                 OpType::PUT_END, tenant_id, key,
                 SerializeMetadataForOpLogFromReplicaDescriptors(
                     metadata.client_id, metadata.size, post, metadata.group_id,
