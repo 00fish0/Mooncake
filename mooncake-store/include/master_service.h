@@ -2021,6 +2021,7 @@ class MasterService {
     const std::string ha_backend_type_;
 
     const std::string ha_backend_connstring_;
+    const bool enable_oplog_;
     const uint32_t oplog_batch_max_entries_;
     const bool use_batch_oplog_;
 
